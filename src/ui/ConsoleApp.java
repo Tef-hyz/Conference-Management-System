@@ -208,5 +208,69 @@ public class ConsoleApp {
         }
         return result;
     }
+    // ==================================================================
+    // Author menu
+    // ==================================================================
+
+    private void authorMenu(AuthorRole author) {
+        boolean back = false;
+        while (!back && currentUser != null) {
+            System.out.println();
+            System.out.println("--- Author Menu ---");
+            System.out.println("1. Submit a paper");
+            System.out.println("2. Withdraw a paper");
+            System.out.println("3. List my papers");
+            System.out.println("0. Back (switch role)");
+            int choice = readInt("Choose an option: ", 0, 3);
+            switch (choice) {
+                case 1:
+                    submitPaper(author);
+                    break;
+                case 2:
+                    withdrawPaper(author);
+                    break;
+                case 3:
+                    listMyPapers(author);
+                    break;
+                default:
+                    back = true;
+            }
+        }
+    }
+
+    private void submitPaper(AuthorRole author) {
+        String title = readLine("Paper title: ");
+        String abstractText = readLine("Abstract: ");
+        List<String> topics = readCsv("Topics (comma-separated): ");
+        List<String> institutions = readCsv("Author institutions (comma-separated): ");
+        try {
+            Paper paper = author.submitPaper(title, abstractText, topics, institutions, repo);
+            System.out.println("Paper submitted: " + paper);
+        } catch (IllegalArgumentException e) {
+            System.out.println("Submission failed: " + e.getMessage());
+        }
+    }
+
+    private void withdrawPaper(AuthorRole author) {
+        listMyPapers(author);
+        String paperId = readLine("Enter paper ID to withdraw: ");
+        if (author.withdrawPaper(paperId.trim(), repo)) {
+            System.out.println("Paper " + paperId + " withdrawn.");
+        } else {
+            System.out.println("Could not withdraw (not your paper, unknown ID, or already decided).");
+        }
+    }
+
+    private void listMyPapers(AuthorRole author) {
+        List<Paper> papers = repo.findPapersByAuthor(author.getAccount().getUserId());
+        if (papers.isEmpty()) {
+            System.out.println("You have not submitted any papers yet.");
+            return;
+        }
+        System.out.println("--- My Papers ---");
+        for (Paper p : papers) {
+            System.out.println("  " + p);
+        }
+    }
 
 }
