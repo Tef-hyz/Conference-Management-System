@@ -208,6 +208,14 @@ public class ConsoleApp {
         }
         return result;
     }
+
+    private int safeParse(String s) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
     // ==================================================================
     // Author menu
     // ==================================================================
