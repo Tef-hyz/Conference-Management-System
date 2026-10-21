@@ -13,7 +13,7 @@ public class ReviewService {
         WorkflowRules.requireRole(reviewer, repo);
         Paper paper = repo.findPaper(paperId);
         if (paper == null || paper.getStatus() == PaperStatus.WITHDRAWN
-                || !reviewer.isAssignedTo(paper.getPaperId()) || !paper.getAssignedReviewerIds().contains(reviewer.getAccount().getUserId())
+                || !paper.hasAssignedReviewer(reviewer.getAccount().getUserId())
                 || !checker.isEligible(reviewer, paper)) return null;
         return paper.toAnonymousView();
     }
@@ -31,8 +31,6 @@ public class ReviewService {
         repo.transaction(() -> {
             Review review = new Review(repo.nextReviewId(), paper.getPaperId(), reviewerId, score, confidence, comments);
             repo.saveReview(review);
-            reviewer.markReviewCompleted(paper.getPaperId());
-            repo.saveUser(reviewer.getAccount());
             repo.recordAudit(new AuditEvent("REVIEW_SUBMITTED", reviewerId, paper.getPaperId(), "Review=" + review.getReviewId()));
             result[0] = review;
         });
@@ -60,7 +58,6 @@ public class ReviewService {
                 Paper paper = repo.findPaper(paperId);
                 if (paper != null && !checker.isEligible(reviewer, paper)) {
                     paper.removeAssignedReviewer(reviewer.getAccount().getUserId());
-                    reviewer.removeAssignedPaper(paperId);
                     repo.savePaper(paper);
                     repo.recordAudit(new AuditEvent("CONFLICT_UNASSIGNED", reviewer.getAccount().getUserId(), paperId, "Conflict=" + value + "; any prior review excluded from completion."));
                 }

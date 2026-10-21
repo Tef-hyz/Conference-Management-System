@@ -19,6 +19,7 @@ public class Paper implements Serializable {
     private final List<String> topics;
     private final List<String> authorIds;
     private final List<String> institutions;
+    // Sole persisted assignment relationship. ReviewerRole queries this through the repository.
     private final List<String> assignedReviewerIds = new ArrayList<String>();
     private PaperStatus status = PaperStatus.SUBMITTED;
     private String overrideReason;
@@ -89,6 +90,10 @@ public class Paper implements Serializable {
 
     public List<String> getAssignedReviewerIds() {
         return Collections.unmodifiableList(assignedReviewerIds);
+    }
+
+    public boolean hasAssignedReviewer(String reviewerId) {
+        return assignedReviewerIds.contains(reviewerId);
     }
 
     public PaperStatus getStatus() {

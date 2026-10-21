@@ -15,8 +15,8 @@ public class DecisionService {
         for (Review review : repo.findReviewsByPaper(paper.getPaperId())) {
             UserAccount user = repo.findUser(review.getReviewerId());
             ReviewerRole r = user == null ? null : user.getRole(ReviewerRole.class);
-            if (r != null && paper.getAssignedReviewerIds().contains(user.getUserId())
-                    && r.isAssignedTo(paper.getPaperId()) && checker.isEligible(r, paper) && ids.add(user.getUserId())) result.add(review);
+            if (r != null && paper.getStatus() != PaperStatus.WITHDRAWN && paper.hasAssignedReviewer(user.getUserId())
+                    && checker.isEligible(r, paper) && ids.add(user.getUserId())) result.add(review);
         }
         return result;
     }

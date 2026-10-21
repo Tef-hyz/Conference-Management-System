@@ -57,10 +57,8 @@ public class AssignmentService {
         repo.transaction(() -> {
             String id = reviewer.getAccount().getUserId();
             paper.addAssignedReviewer(id);
-            reviewer.addAssignedPaper(paper.getPaperId());
             if (paper.getStatus() == PaperStatus.SUBMITTED) paper.setStatus(PaperStatus.UNDER_REVIEW);
             repo.savePaper(paper);
-            repo.saveUser(reviewer.getAccount());
             repo.recordAudit(new AuditEvent("REVIEWER_ASSIGNED", chair.getAccount().getUserId(), paper.getPaperId(), "Reviewer=" + id));
         });
         return true;
