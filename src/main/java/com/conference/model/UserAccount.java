@@ -30,9 +30,9 @@ public class UserAccount implements Serializable {
             throw new IllegalArgumentException("userId must not be empty");
         }
         this.userId = userId;
-        this.name = name;
-        this.email = email;
-        this.institution = institution;
+        setName(name);
+        setEmail(email);
+        setInstitution(institution);
     }
 
     // ---- password handling ----
@@ -47,7 +47,7 @@ public class UserAccount implements Serializable {
 
     /** Returns true if the given plain-text password matches the stored hash. */
     public boolean checkPassword(String plainPassword) {
-        return passwordHash != null && passwordHash.equals(sha256(plainPassword));
+        return plainPassword != null && passwordHash != null && passwordHash.equals(sha256(plainPassword));
     }
 
     /** True if this account already has a password (false for legacy data). */
@@ -69,10 +69,16 @@ public class UserAccount implements Serializable {
         }
     }
 
-    /** Adds a role to this account (idempotent thanks to Set semantics). */
+    /** Role ownership and uniqueness are invariants, independent of Set identity semantics. */
     public void addRole(ConferenceRole role) {
         if (role == null) {
             throw new IllegalArgumentException("role must not be null");
+        }
+        if (role.getAccount() != this) {
+            throw new IllegalArgumentException("A role must belong to this account.");
+        }
+        for (ConferenceRole existing : roles) {
+            if (existing.getClass() == role.getClass()) return;
         }
         roles.add(role);
     }
@@ -120,7 +126,7 @@ public class UserAccount implements Serializable {
     }
 
     public void setName(String name) {
-        this.name = name;
+        this.name = required(name, "Name");
     }
 
     public String getEmail() {
@@ -128,7 +134,10 @@ public class UserAccount implements Serializable {
     }
 
     public void setEmail(String email) {
-        this.email = email;
+        String value = required(email, "Email");
+        if (!value.matches("[^\\s@]+@[^\\s@]+\\.[^\\s@]+"))
+            throw new IllegalArgumentException("Email must be a valid address.");
+        this.email = value;
     }
 
     public String getInstitution() {
@@ -136,7 +145,12 @@ public class UserAccount implements Serializable {
     }
 
     public void setInstitution(String institution) {
-        this.institution = institution;
+        this.institution = required(institution, "Institution");
+    }
+
+    private static String required(String value, String field) {
+        if (value == null || value.trim().isEmpty()) throw new IllegalArgumentException(field + " must not be empty.");
+        return value.trim();
     }
 
     @Override

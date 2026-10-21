@@ -26,12 +26,14 @@ public class Review implements Serializable {
         if (confidence < MIN_SCORE || confidence > MAX_SCORE) {
             throw new IllegalArgumentException("confidence must be between " + MIN_SCORE + " and " + MAX_SCORE);
         }
+        if (reviewId == null || paperId == null || reviewerId == null || comments == null || comments.trim().isEmpty())
+            throw new IllegalArgumentException("Review IDs and non-empty comments are required.");
         this.reviewId = reviewId;
         this.paperId = paperId;
         this.reviewerId = reviewerId;
         this.score = score;
         this.confidence = confidence;
-        this.comments = comments == null ? "" : comments;
+        this.comments = comments.trim();
     }
 
     public String getReviewId() {

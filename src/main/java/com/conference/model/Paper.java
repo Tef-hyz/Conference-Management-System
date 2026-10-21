@@ -21,6 +21,9 @@ public class Paper implements Serializable {
     private final List<String> institutions;
     private final List<String> assignedReviewerIds = new ArrayList<String>();
     private PaperStatus status = PaperStatus.SUBMITTED;
+    private String overrideReason;
+    private String decisionBy;
+    private String decisionTime;
 
     public Paper(String paperId, String title, String abstractText,
                  List<String> topics, List<String> authorIds, List<String> institutions) {
@@ -28,11 +31,11 @@ public class Paper implements Serializable {
             throw new IllegalArgumentException("paperId must not be empty");
         }
         this.paperId = paperId;
-        this.title = title;
-        this.abstractText = abstractText;
-        this.topics = new ArrayList<String>(topics);
-        this.authorIds = new ArrayList<String>(authorIds);
-        this.institutions = new ArrayList<String>(institutions);
+        setTitle(title);
+        setAbstractText(abstractText);
+        this.topics = requiredList(topics, "Topics");
+        this.authorIds = requiredList(authorIds, "Authors");
+        this.institutions = requiredList(institutions, "Institutions");
     }
 
     /**
@@ -44,6 +47,9 @@ public class Paper implements Serializable {
     }
 
     public void addAssignedReviewer(String reviewerId) {
+        if (reviewerId == null || reviewerId.trim().isEmpty()) throw new IllegalArgumentException("Reviewer ID is required.");
+        if (!assignedReviewerIds.contains(reviewerId) && assignedReviewerIds.size() >= 2)
+            throw new IllegalStateException("A paper cannot have more than two reviewers.");
         if (!assignedReviewerIds.contains(reviewerId)) {
             assignedReviewerIds.add(reviewerId);
         }
@@ -58,7 +64,7 @@ public class Paper implements Serializable {
     }
 
     public void setTitle(String title) {
-        this.title = title;
+        this.title = required(title, "Paper title");
     }
 
     public String getAbstractText() {
@@ -66,7 +72,7 @@ public class Paper implements Serializable {
     }
 
     public void setAbstractText(String abstractText) {
-        this.abstractText = abstractText;
+        this.abstractText = required(abstractText, "Abstract");
     }
 
     public List<String> getTopics() {
@@ -90,7 +96,38 @@ public class Paper implements Serializable {
     }
 
     public void setStatus(PaperStatus status) {
+        if (status == null) throw new IllegalArgumentException("Paper status is required.");
+        if (this.status == status) return;
+        boolean valid = (this.status == PaperStatus.SUBMITTED && (status == PaperStatus.UNDER_REVIEW || status == PaperStatus.WITHDRAWN))
+                || (this.status == PaperStatus.UNDER_REVIEW && (status == PaperStatus.WITHDRAWN || status == PaperStatus.ACCEPTED || status == PaperStatus.REJECTED));
+        if (!valid) throw new IllegalStateException("Invalid paper status transition.");
         this.status = status;
+    }
+
+    public void removeAssignedReviewer(String reviewerId) { assignedReviewerIds.remove(reviewerId); }
+    public String getSubmittingAuthorId() { return authorIds.get(0); }
+    public String getOverrideReason() { return overrideReason == null ? "" : overrideReason; }
+    public String getDecisionBy() { return decisionBy; }
+    public String getDecisionTime() { return decisionTime; }
+    public void recordDecision(boolean accept, String userId, String reason) {
+        if (status != PaperStatus.UNDER_REVIEW) throw new IllegalStateException("Paper is not under review.");
+        decisionBy = required(userId, "Decision user");
+        overrideReason = reason == null ? "" : reason.trim();
+        decisionTime = java.time.Instant.now().toString();
+        setStatus(accept ? PaperStatus.ACCEPTED : PaperStatus.REJECTED);
+    }
+    private static String required(String value, String field) {
+        if (value == null || value.trim().isEmpty()) throw new IllegalArgumentException(field + " must not be empty.");
+        return value.trim();
+    }
+    private static List<String> requiredList(List<String> values, String field) {
+        if (values == null || values.isEmpty()) throw new IllegalArgumentException(field + " must not be empty.");
+        List<String> result = new ArrayList<String>();
+        for (String value : values) {
+            String item = required(value, field);
+            if (!result.contains(item)) result.add(item);
+        }
+        return result;
     }
 
     @Override

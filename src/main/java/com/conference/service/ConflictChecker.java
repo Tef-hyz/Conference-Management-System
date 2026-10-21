@@ -12,6 +12,14 @@ import java.util.List;
  */
 public class ConflictChecker {
 
+    public static ConflictChecker standard() {
+        ConflictChecker checker = new ConflictChecker();
+        checker.addRule(new AuthorConflictRule());
+        checker.addRule(new SameInstitutionRule());
+        checker.addRule(new DeclaredConflictRule());
+        return checker;
+    }
+
     private final List<ConflictRule> rules = new ArrayList<ConflictRule>();
 
     public void addRule(ConflictRule rule) {
