@@ -12,7 +12,11 @@ import com.conference.ui.ConsoleApp;
 public class Main {
 
     public static void main(String[] args) {
-        ConferenceRepository repo = new FileDataStore();
-        new ConsoleApp(repo).run();
+        try {
+            ConferenceRepository repo = new FileDataStore();
+            new ConsoleApp(repo).run();
+        } catch (com.conference.persistence.StorageException e) {
+            System.err.println("Storage error: " + e.getMessage());
+        }
     }
 }

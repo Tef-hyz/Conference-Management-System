@@ -1,204 +1,211 @@
 package com.conference.persistence;
 
-import com.conference.model.AuthorRole;
-import com.conference.model.ChairRole;
-import com.conference.model.Paper;
-import com.conference.model.Review;
-import com.conference.model.ReviewerRole;
-import com.conference.model.UserAccount;
+import com.conference.model.*;
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-
-/**
- * File-based implementation of {@link ConferenceRepository}.
- * <p>
- * The full system state is serialized to {@code data/conference-data.ser}
- * (created automatically on first run, relative to the working directory).
- * Every mutating operation is written through to disk, so no manual
- * configuration or save step is required.
- */
+/** Atomic file snapshots. Corrupt files are preserved; storage failure is fatal to a session. */
 public class FileDataStore implements ConferenceRepository {
-
-    private static final String DATA_DIR = "data";
-    private static final String DATA_FILE = "conference-data.ser";
-
     private final File storageFile;
     private DataStore store;
+    private int transactionDepth;
+    public static final String DEMO_PASSWORD = "123456";
 
-    /** Uses the default location {@code data/conference-data.ser}. */
-    public FileDataStore() {
-        this(new File(DATA_DIR, DATA_FILE));
-    }
-
+    public FileDataStore() { this(new File("data", "conference-data.ser")); }
     public FileDataStore(File storageFile) {
         this.storageFile = storageFile;
         load();
     }
 
-    // ------------------------------------------------------------------
-    // File I/O
-    // ------------------------------------------------------------------
-
     private void load() {
         if (storageFile.exists()) {
             try (ObjectInputStream in = new ObjectInputStream(new FileInputStream(storageFile))) {
-                store = (DataStore) in.readObject();
+                Object loaded = in.readObject();
+                if (!(loaded instanceof DataStore)) throw new IOException("Invalid snapshot type or null snapshot");
+                store = (DataStore) loaded;
+                migrateAndValidate();
                 System.out.println("[FileDataStore] Loaded existing data from " + storageFile.getPath());
                 return;
-            } catch (IOException | ClassNotFoundException | ClassCastException e) {
-                System.err.println("[FileDataStore] Could not read data file (" + e.getMessage()
-                        + "). Starting with fresh demo data.");
+            } catch (IOException | ClassNotFoundException | RuntimeException e) {
+                throw new StorageException("Could not read data file. Original file was preserved: " + storageFile.getPath(), e);
             }
         }
         store = new DataStore();
-        seedDemoData();
+        transactionDepth++;
+        try { seedDemoData(); } finally { transactionDepth--; }
         persist();
         System.out.println("[FileDataStore] First run: created demo data in " + storageFile.getPath());
         System.out.println("[FileDataStore] Demo users U001-U006, password for all: " + DEMO_PASSWORD);
     }
 
-    @Override
-    public synchronized void persist() {
-        File parent = storageFile.getParentFile();
-        if (parent != null && !parent.exists() && !parent.mkdirs()) {
-            System.err.println("[FileDataStore] Could not create directory " + parent.getPath());
-            return;
+    private void migrateAndValidate() throws IOException {
+        if (store.users == null || store.papers == null || store.reviews == null)
+            throw new IOException("Missing snapshot collections");
+        boolean legacy = store.configuration == null;
+        if (legacy) store.configuration = new ConferenceConfiguration();
+        if (store.auditEvents == null) store.auditEvents = new ArrayList<AuditEvent>();
+        Set<String> emails = new HashSet<String>();
+        for (Map.Entry<String, UserAccount> entry : store.users.entrySet()) {
+            UserAccount u = entry.getValue();
+            if (u == null || !entry.getKey().equals(u.getUserId()) || u.getEmail() == null || u.getRoles() == null)
+                throw new IOException("Invalid user record");
+            if (!emails.add(u.getEmail().toLowerCase(Locale.ROOT))) throw new IOException("Duplicate email");
+            Set<Class<?>> types = new HashSet<Class<?>>();
+            for (ConferenceRole role : u.getRoles())
+                if (role == null || role.getAccount() != u || !types.add(role.getClass()))
+                    throw new IOException("Invalid or duplicate account roles");
         }
-        try (ObjectOutputStream out = new ObjectOutputStream(new FileOutputStream(storageFile))) {
-            out.writeObject(store);
+        boolean assigned = false, undecided = false;
+        for (Map.Entry<String, Paper> entry : store.papers.entrySet()) {
+            Paper paper = entry.getValue();
+            if (paper == null || !entry.getKey().equals(paper.getPaperId()) || paper.getStatus() == null
+                    || paper.getAuthorIds().isEmpty() || paper.getTopics().isEmpty()) throw new IOException("Invalid paper record");
+            for (String id : paper.getAuthorIds()) if (store.users.get(id) == null) throw new IOException("Unknown author");
+            if (paper.getAssignedReviewerIds().size() > 2) throw new IOException("Paper exceeds two-reviewer limit");
+            if (paper.getStatus() == PaperStatus.WITHDRAWN) {
+                for (String id : new ArrayList<String>(paper.getAssignedReviewerIds())) {
+                    UserAccount u = store.users.get(id);
+                    if (u != null && u.getRole(ReviewerRole.class) != null) u.getRole(ReviewerRole.class).removeAssignedPaper(paper.getPaperId());
+                    paper.removeAssignedReviewer(id);
+                }
+            }
+            for (String id : paper.getAssignedReviewerIds()) {
+                UserAccount u = store.users.get(id);
+                if (u == null || u.getRole(ReviewerRole.class) == null) throw new IOException("Unknown reviewer");
+                u.getRole(ReviewerRole.class).addAssignedPaper(paper.getPaperId());
+            }
+            assigned |= paper.getStatus() == PaperStatus.UNDER_REVIEW;
+            undecided |= paper.getStatus() == PaperStatus.SUBMITTED || paper.getStatus() == PaperStatus.UNDER_REVIEW;
+        }
+        for (ReviewerRole reviewer : findAllReviewers()) {
+            for (String id : new ArrayList<String>(reviewer.getAssignedPaperIds())) {
+                Paper paper = store.papers.get(id);
+                if (paper == null || !paper.getAssignedReviewerIds().contains(reviewer.getAccount().getUserId()))
+                    reviewer.removeAssignedPaper(id);
+            }
+        }
+        Set<String> pairs = new HashSet<String>();
+        for (Review review : store.reviews.values()) {
+            if (review == null || !store.papers.containsKey(review.getPaperId()) || !store.users.containsKey(review.getReviewerId())
+                    || !pairs.add(review.getPaperId() + ":" + review.getReviewerId())) throw new IOException("Invalid or duplicate review");
+        }
+        // Derive pending workload from authoritative stored reviews rather than an old cache.
+        // Keep assignment relationships for access, history and valid-review counting.
+        for (ReviewerRole reviewer : findAllReviewers()) {
+            List<String> completed = new ArrayList<String>();
+            for (Review review : findReviewsByReviewer(reviewer.getAccount().getUserId()))
+                completed.add(review.getPaperId());
+            reviewer.restoreCompletedReviews(completed);
+        }
+        if (legacy) {
+            ConferencePhase phase = assigned ? ConferencePhase.REVIEW : (!undecided && !store.papers.isEmpty() ? ConferencePhase.DECISION : ConferencePhase.SUBMISSION);
+            store.configuration = store.configuration.withPhase(phase);
+            store.auditEvents.add(new AuditEvent("LEGACY_MIGRATION", "SYSTEM", "-", "Added configuration and audit support; no historical events fabricated."));
+        }
+    }
+
+    @Override public synchronized void persist() {
+        if (transactionDepth > 0) return;
+        Path target = storageFile.toPath().toAbsolutePath();
+        try {
+            Path parent = target.getParent();
+            Files.createDirectories(parent);
+            Path temp = Files.createTempFile(parent, "conference-snapshot-", ".tmp");
+            try (FileOutputStream file = new FileOutputStream(temp.toFile()); ObjectOutputStream out = new ObjectOutputStream(file)) {
+                out.writeObject(store);
+                out.flush();
+                file.getFD().sync();
+            }
+            // Keep the previously committed snapshot. A failed write never truncates it.
+            if (Files.exists(target)) Files.copy(target, target.resolveSibling(target.getFileName() + ".bak"), StandardCopyOption.REPLACE_EXISTING);
+            // Fail safely if this filesystem cannot atomically replace the snapshot.
+            Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
-            System.err.println("[FileDataStore] Failed to save data: " + e.getMessage());
+            throw new StorageException("Failed to save data; operation was not confirmed. Previous snapshot was preserved: " + storageFile.getPath(), e);
         }
     }
 
-    // ------------------------------------------------------------------
-    // ID generation
-    // ------------------------------------------------------------------
-
-    @Override
-    public synchronized String nextUserId() {
-        return String.format("U%03d", ++store.userSeq);
+    private DataStore copySnapshot() {
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            try (ObjectOutputStream out = new ObjectOutputStream(bytes)) { out.writeObject(store); }
+            try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) { return (DataStore) in.readObject(); }
+        } catch (IOException | ClassNotFoundException e) { throw new StorageException("Could not prepare transaction.", e); }
     }
 
-    @Override
-    public synchronized String nextPaperId() {
-        return String.format("P%03d", ++store.paperSeq);
+    @Override public synchronized void transaction(Runnable action) {
+        if (transactionDepth > 0) { action.run(); return; }
+        DataStore before = copySnapshot();
+        transactionDepth++;
+        try {
+            action.run();
+            transactionDepth--;
+            persist();
+        } catch (RuntimeException e) {
+            transactionDepth = 0;
+            store = before;
+            throw e;
+        }
     }
 
-    @Override
-    public synchronized String nextReviewId() {
-        return String.format("R%03d", ++store.reviewSeq);
+    @Override public synchronized String nextUserId() { return String.format("U%03d", ++store.userSeq); }
+    @Override public synchronized String nextPaperId() { return String.format("P%03d", ++store.paperSeq); }
+    @Override public synchronized String nextReviewId() { return String.format("R%03d", ++store.reviewSeq); }
+
+    @Override public synchronized void saveUser(final UserAccount user) {
+        for (UserAccount other : store.users.values())
+            if (!other.getUserId().equals(user.getUserId()) && other.getEmail().equalsIgnoreCase(user.getEmail()))
+                throw new IllegalArgumentException("Email is already registered.");
+        transaction(() -> store.users.put(user.getUserId(), user));
     }
-
-    // ------------------------------------------------------------------
-    // Users
-    // ------------------------------------------------------------------
-
-    @Override
-    public synchronized void saveUser(UserAccount user) {
-        store.users.put(user.getUserId(), user);
-        persist();
+    /** Supports existing IDs and case-insensitive email login without changing callers. */
+    @Override public synchronized UserAccount findUser(String id) {
+        if (id == null) return null;
+        String key = id.trim();
+        UserAccount user = store.users.get(key.toUpperCase(Locale.ROOT));
+        if (user != null) return user;
+        for (UserAccount candidate : store.users.values()) if (candidate.getEmail().equalsIgnoreCase(key)) return candidate;
+        return null;
     }
-
-    @Override
-    public synchronized UserAccount findUser(String userId) {
-        return store.users.get(userId);
-    }
-
-    @Override
-    public synchronized List<UserAccount> findAllUsers() {
-        return new ArrayList<UserAccount>(store.users.values());
-    }
-
-    @Override
-    public synchronized List<ReviewerRole> findAllReviewers() {
-        List<ReviewerRole> reviewers = new ArrayList<ReviewerRole>();
+    @Override public synchronized List<UserAccount> findAllUsers() { return new ArrayList<UserAccount>(store.users.values()); }
+    @Override public synchronized List<ReviewerRole> findAllReviewers() {
+        List<ReviewerRole> result = new ArrayList<ReviewerRole>();
         for (UserAccount user : store.users.values()) {
             ReviewerRole role = user.getRole(ReviewerRole.class);
-            if (role != null) {
-                reviewers.add(role);
-            }
+            if (role != null) result.add(role);
         }
-        return reviewers;
+        return result;
     }
-
-    // ------------------------------------------------------------------
-    // Papers
-    // ------------------------------------------------------------------
-
-    @Override
-    public synchronized void savePaper(Paper paper) {
-        store.papers.put(paper.getPaperId(), paper);
-        persist();
-    }
-
-    @Override
-    public synchronized Paper findPaper(String paperId) {
-        return store.papers.get(paperId);
-    }
-
-    @Override
-    public synchronized List<Paper> findAllPapers() {
-        return new ArrayList<Paper>(store.papers.values());
-    }
-
-    @Override
-    public synchronized List<Paper> findPapersByAuthor(String authorId) {
+    @Override public synchronized void savePaper(final Paper paper) { transaction(() -> store.papers.put(paper.getPaperId(), paper)); }
+    @Override public synchronized Paper findPaper(String id) { return id == null ? null : store.papers.get(id.trim().toUpperCase(Locale.ROOT)); }
+    @Override public synchronized List<Paper> findAllPapers() { return new ArrayList<Paper>(store.papers.values()); }
+    @Override public synchronized List<Paper> findPapersByAuthor(String authorId) {
         List<Paper> result = new ArrayList<Paper>();
-        for (Paper paper : store.papers.values()) {
-            if (paper.getAuthorIds().contains(authorId)) {
-                result.add(paper);
-            }
-        }
+        for (Paper paper : store.papers.values()) if (paper.getAuthorIds().contains(authorId)) result.add(paper);
         return result;
     }
-
-    // ------------------------------------------------------------------
-    // Reviews
-    // ------------------------------------------------------------------
-
-    @Override
-    public synchronized void saveReview(Review review) {
-        store.reviews.put(review.getReviewId(), review);
-        persist();
-    }
-
-    @Override
-    public synchronized List<Review> findReviewsByPaper(String paperId) {
+    @Override public synchronized void saveReview(final Review review) { transaction(() -> store.reviews.put(review.getReviewId(), review)); }
+    @Override public synchronized List<Review> findReviewsByPaper(String id) {
         List<Review> result = new ArrayList<Review>();
-        for (Review review : store.reviews.values()) {
-            if (review.getPaperId().equals(paperId)) {
-                result.add(review);
-            }
-        }
+        for (Review review : store.reviews.values()) if (review.getPaperId().equals(id)) result.add(review);
         return result;
     }
-
-    @Override
-    public synchronized List<Review> findReviewsByReviewer(String reviewerId) {
+    @Override public synchronized List<Review> findReviewsByReviewer(String id) {
         List<Review> result = new ArrayList<Review>();
-        for (Review review : store.reviews.values()) {
-            if (review.getReviewerId().equals(reviewerId)) {
-                result.add(review);
-            }
-        }
+        for (Review review : store.reviews.values()) if (review.getReviewerId().equals(id)) result.add(review);
         return result;
     }
-
-    // ------------------------------------------------------------------
-    // Demo seed (first run only) - keeps the CUI immediately usable
-    // ------------------------------------------------------------------
-
-    /** Default password for all seeded demo accounts (shown on first run). */
-    public static final String DEMO_PASSWORD = "123456";
+    @Override public synchronized ConferenceConfiguration getConfiguration() { return store.configuration; }
+    @Override public synchronized void saveConfiguration(final ConferenceConfiguration configuration) {
+        if (configuration == null) throw new IllegalArgumentException("Configuration is required.");
+        transaction(() -> store.configuration = configuration);
+    }
+    @Override public synchronized void recordAudit(final AuditEvent event) {
+        if (event == null) throw new IllegalArgumentException("Audit event is required.");
+        transaction(() -> store.auditEvents.add(event));
+    }
+    @Override public synchronized List<AuditEvent> findAuditEvents() { return new ArrayList<AuditEvent>(store.auditEvents); }
 
     private void seedDemoData() {
         UserAccount alice = new UserAccount(nextUserId(), "Alice Chen", "alice@cityu.edu.hk", "City University");

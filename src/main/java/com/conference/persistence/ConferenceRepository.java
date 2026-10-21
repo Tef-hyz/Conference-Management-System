@@ -4,6 +4,8 @@ import com.conference.model.Paper;
 import com.conference.model.Review;
 import com.conference.model.ReviewerRole;
 import com.conference.model.UserAccount;
+import com.conference.model.ConferenceConfiguration;
+import com.conference.model.AuditEvent;
 
 import java.util.List;
 
@@ -49,4 +51,15 @@ public interface ConferenceRepository {
 
     /** Flushes the current state to persistent storage. */
     void persist();
+
+    /** Commits related changes together or restores the in-memory snapshot on failure. */
+    void transaction(Runnable action);
+
+    ConferenceConfiguration getConfiguration();
+
+    void saveConfiguration(ConferenceConfiguration configuration);
+
+    void recordAudit(AuditEvent event);
+
+    List<AuditEvent> findAuditEvents();
 }

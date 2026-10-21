@@ -7,6 +7,10 @@ import com.conference.model.UserAccount;
 import java.io.Serializable;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
+import java.util.ArrayList;
+import com.conference.model.ConferenceConfiguration;
+import com.conference.model.AuditEvent;
 
 /**
  * Serializable in-memory snapshot of the whole system state.
@@ -23,4 +27,7 @@ class DataStore implements Serializable {
     int userSeq;
     int paperSeq;
     int reviewSeq;
+    // Nullable when reading an older serialVersionUID=1 snapshot; migrated on load.
+    ConferenceConfiguration configuration = new ConferenceConfiguration();
+    List<AuditEvent> auditEvents = new ArrayList<AuditEvent>();
 }

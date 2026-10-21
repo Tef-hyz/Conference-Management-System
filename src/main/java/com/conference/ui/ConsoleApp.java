@@ -18,6 +18,11 @@ import com.conference.service.SameInstitutionRule;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Scanner;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import com.conference.model.*;
+import com.conference.service.ConferenceService;
+import com.conference.service.DecisionService;
 
 /**
  * Character-based user interface (CUI) of the conference paper review system.
@@ -30,16 +35,18 @@ public class ConsoleApp {
     private final ConflictChecker conflictChecker;
     private final AssignmentService assignmentService;
     private final ReviewService reviewService;
+    private final DecisionService decisionService;
+    private final ConferenceService conferenceService;
 
     private UserAccount currentUser;
 
     public ConsoleApp(ConferenceRepository repo) {
         this.repo = repo;
-        this.conflictChecker = new ConflictChecker();
-        conflictChecker.addRule(new SameInstitutionRule());
-        conflictChecker.addRule(new DeclaredConflictRule());
+        this.conflictChecker = ConflictChecker.standard();
         this.assignmentService = new AssignmentService(conflictChecker, repo);
         this.reviewService = new ReviewService(repo);
+        this.decisionService = new DecisionService(repo);
+        this.conferenceService = new ConferenceService(repo);
     }
 
     // ==================================================================
@@ -48,22 +55,37 @@ public class ConsoleApp {
 
     public void run() {
         printBanner();
-        boolean running = true;
-        while (running) {
-            if (currentUser == null) {
-                running = mainMenu();
-            } else {
-                sessionMenu();
+        try {
+            boolean running = true;
+            while (running) {
+                try {
+                    if (currentUser == null) running = mainMenu();
+                    else sessionMenu();
+                } catch (TaskCancelled e) {
+                    System.out.println("Operation cancelled.");
+                    refreshSession();
+                } catch (IllegalArgumentException | IllegalStateException e) {
+                    System.out.println("Operation refused: " + e.getMessage());
+                    refreshSession();
+                }
             }
+        } catch (EndOfInput e) {
+            System.out.println("Input closed. Exiting.");
         }
         repo.persist();
         System.out.println("Data saved. Goodbye!");
+    }
+
+    private void refreshSession() {
+        if (currentUser != null) currentUser = repo.findUser(currentUser.getUserId());
     }
 
     private void printBanner() {
         System.out.println("======================================================");
         System.out.println("      Conference Paper Review System (CUI) v1.0");
         System.out.println("======================================================");
+        System.out.println("During input: /cancel (or q) cancels; /exit exits. 0 cancels a text field.");
+        System.out.println("Conference: " + repo.getConfiguration());
     }
 
     private boolean mainMenu() {
@@ -91,7 +113,7 @@ public class ConsoleApp {
     // ==================================================================
 
     private void login() {
-        String id = readLine("User ID: ").trim();
+        String id = readLine("User ID or Email: ").trim();
         String password = readLine("Password: ");
         UserAccount user = repo.findUser(id);
         if (user == null || !user.hasPassword() || !user.checkPassword(password)) {
@@ -108,39 +130,35 @@ public class ConsoleApp {
         String institution = readLine("Institution: ");
         String password = readLine("Password: ");
         UserAccount user = new UserAccount(repo.nextUserId(), name, email, institution);
-        try {
-            user.setPassword(password);
-        } catch (IllegalArgumentException e) {
-            System.out.println("Registration failed: " + e.getMessage());
-            return;
-        }
+        user.setPassword(password);
         grantRoleMenu(user);
-        repo.saveUser(user);
+        repo.transaction(() -> {
+            repo.saveUser(user);
+            repo.recordAudit(new AuditEvent("USER_REGISTERED", user.getUserId(), "-", "Public registration (Author/Reviewer only)."));
+        });
         System.out.println("Registered: " + user);
     }
 
     private void grantRoleMenu(UserAccount user) {
         System.out.println("Grant roles to " + user.getName() + ":");
-        System.out.println("1. Author   2. Reviewer   3. Chair   (comma-separated, e.g. 1,2)");
+        System.out.println("1. Author   2. Reviewer   (comma-separated, e.g. 1,2)");
         String input = readLine("Roles: ");
+        Set<String> tokens = new LinkedHashSet<String>();
         for (String token : input.split(",")) {
-            String t = token.trim();
-            if ("1".equals(t)) {
-                user.addRole(new AuthorRole(user));
-            } else if ("2".equals(t)) {
-                ReviewerRole reviewer = new ReviewerRole(user);
-                String topics = readLine("Expertise topics (comma-separated): ");
-                for (String topic : topics.split(",")) {
-                    reviewer.addExpertiseTopic(topic);
-                }
-                user.addRole(reviewer);
-            } else if ("3".equals(t)) {
-                user.addRole(new ChairRole(user));
-            }
+            String value = token.trim();
+            if (!"1".equals(value) && !"2".equals(value))
+                throw new IllegalArgumentException("Select Author or Reviewer. Chair roles require Chair authorisation.");
+            tokens.add(value);
         }
-        if (user.getRoles().isEmpty()) {
-            System.out.println("No valid role selected; defaulting to Author.");
-            user.addRole(new AuthorRole(user));
+        if (tokens.isEmpty()) throw new IllegalArgumentException("At least one role is required.");
+        for (String token : tokens) {
+            if ("1".equals(token)) user.addRole(new AuthorRole(user));
+            else {
+                ReviewerRole reviewer = new ReviewerRole(user);
+                reviewer.setExpertiseTopics(readCsv("Expertise topics (comma-separated): "));
+                reviewer.setMaxWorkload(repo.getConfiguration().getMaxWorkload());
+                user.addRole(reviewer);
+            }
         }
     }
 
@@ -176,14 +194,24 @@ public class ConsoleApp {
     // ==================================================================
 
     private String readLine(String prompt) {
+        String input = inputLine(prompt);
+        if ("0".equals(input.trim())) throw new TaskCancelled();
+        return input;
+    }
+
+    private String inputLine(String prompt) {
         System.out.print(prompt);
-        return scanner.nextLine();
+        if (!scanner.hasNextLine()) throw new EndOfInput();
+        String value = scanner.nextLine();
+        if ("/exit".equalsIgnoreCase(value.trim())) throw new EndOfInput();
+        if ("/cancel".equalsIgnoreCase(value.trim()) || "q".equalsIgnoreCase(value.trim())) throw new TaskCancelled();
+        return value;
     }
 
     private int readInt(String prompt, int min, int max) {
         while (true) {
-            System.out.print(prompt);
-            String input = scanner.nextLine().trim();
+            String input = inputLine(prompt).trim();
+            if ("0".equals(input) && min > 0) throw new TaskCancelled();
             try {
                 int value = Integer.parseInt(input);
                 if (value < min || value > max) {
@@ -251,12 +279,9 @@ public class ConsoleApp {
         String abstractText = readLine("Abstract: ");
         List<String> topics = readCsv("Topics (comma-separated): ");
         List<String> institutions = readCsv("Author institutions (comma-separated): ");
-        try {
-            Paper paper = author.submitPaper(title, abstractText, topics, institutions, repo);
-            System.out.println("Paper submitted: " + paper);
-        } catch (IllegalArgumentException e) {
-            System.out.println("Submission failed: " + e.getMessage());
-        }
+        List<String> coAuthors = readCsv("Co-author user IDs (comma-separated, blank for none): ");
+        Paper paper = author.submitPaper(title, abstractText, topics, institutions, coAuthors, repo);
+        System.out.println("Paper submitted: [" + paper.getPaperId() + "] \"" + paper.getTitle() + "\" | status=" + paper.getStatus());
     }
 
     private void withdrawPaper(AuthorRole author) {
@@ -276,8 +301,10 @@ public class ConsoleApp {
             return;
         }
         System.out.println("--- My Papers ---");
-        for (Paper p : papers) {
-            System.out.println("  " + p);
+        for (Paper paper : papers) {
+            System.out.println("  [" + paper.getPaperId() + "] \"" + paper.getTitle() + "\" | status=" + paper.getStatus() + " | topics=" + paper.getTopics());
+            if (paper.getStatus() == PaperStatus.ACCEPTED || paper.getStatus() == PaperStatus.REJECTED)
+                for (String feedback : decisionService.authorFeedback(author, paper.getPaperId())) System.out.println("    " + feedback);
         }
     }
 
@@ -295,8 +322,9 @@ public class ConsoleApp {
             System.out.println("2. Submit a review");
             System.out.println("3. Declare a conflict of interest");
             System.out.println("4. List my submitted reviews");
+            System.out.println("5. Update expertise topics");
             System.out.println("0. Back (switch role)");
-            int choice = readInt("Choose an option: ", 0, 4);
+            int choice = readInt("Choose an option: ", 0, 5);
             switch (choice) {
                 case 1:
                     viewAssignedPapers(reviewer);
@@ -309,6 +337,10 @@ public class ConsoleApp {
                     break;
                 case 4:
                     listMyReviews(reviewer);
+                    break;
+                case 5:
+                    reviewService.updateExpertise(reviewer, readCsv("Expertise topics (comma-separated): "));
+                    System.out.println("Expertise updated.");
                     break;
                 default:
                     back = true;
@@ -340,18 +372,13 @@ public class ConsoleApp {
         int score = readInt("Score (1=reject ... 5=strong accept): ", Review.MIN_SCORE, Review.MAX_SCORE);
         int confidence = readInt("Confidence (1=low ... 5=high): ", Review.MIN_SCORE, Review.MAX_SCORE);
         String comments = readLine("Comments: ");
-        try {
-            Review review = reviewService.submitReview(reviewer, paperId, score, confidence, comments);
-            System.out.println("Review submitted: " + review);
-        } catch (IllegalArgumentException | IllegalStateException e) {
-            System.out.println("Review rejected: " + e.getMessage());
-        }
+        Review review = reviewService.submitReview(reviewer, paperId, score, confidence, comments);
+        System.out.println("Review submitted: " + review);
     }
 
     private void declareConflict(ReviewerRole reviewer) {
         String id = readLine("Enter the paper ID or author user ID you have a conflict with: ");
-        reviewer.declareConflict(id);
-        repo.saveUser(reviewer.getAccount());
+        reviewService.declareConflict(reviewer, id);
         System.out.println("Conflict declared for: " + id);
     }
 
@@ -381,8 +408,12 @@ public class ConsoleApp {
             System.out.println("3. Manually assign a reviewer");
             System.out.println("4. View reviews of a paper");
             System.out.println("5. Make decision (accept / reject)");
+            System.out.println("6. Configure conference");
+            System.out.println("7. Change conference phase");
+            System.out.println("8. View audit log");
+            System.out.println("9. Grant Chair role");
             System.out.println("0. Back (switch role)");
-            int choice = readInt("Choose an option: ", 0, 5);
+            int choice = readInt("Choose an option: ", 0, 9);
             switch (choice) {
                 case 1:
                     listAllPapers();
@@ -398,6 +429,19 @@ public class ConsoleApp {
                     break;
                 case 5:
                     makeDecision(chair);
+                    break;
+                case 6:
+                    configureConference(chair);
+                    break;
+                case 7:
+                    changePhase(chair);
+                    break;
+                case 8:
+                    for (AuditEvent event : repo.findAuditEvents()) System.out.println(event);
+                    break;
+                case 9:
+                    conferenceService.grantChair(chair, readLine("User ID: ").trim());
+                    System.out.println("Chair role granted.");
                     break;
                 default:
                     back = true;
@@ -426,9 +470,11 @@ public class ConsoleApp {
             System.out.println("Paper not found.");
             return;
         }
-        int assigned = assignmentService.autoAssign(paper, repo.findAllReviewers());
+        int assigned = assignmentService.autoAssign(paper, repo.findAllReviewers(), chair);
         System.out.println("Auto-assignment complete: " + assigned + " reviewer(s) assigned. "
                 + "Current reviewers: " + paper.getAssignedReviewerIds());
+        int shortfall = repo.getConfiguration().getRequiredReviewers() - paper.getAssignedReviewerIds().size();
+        if (shortfall > 0) System.out.println("Insufficient eligible matching reviewers; shortfall=" + shortfall);
     }
 
     private void manualAssign(ChairRole chair) {
@@ -447,7 +493,7 @@ public class ConsoleApp {
         System.out.println("--- Available Reviewers ---");
         for (ReviewerRole r : reviewers) {
             List<String> violated = conflictChecker.findViolatedRules(r, paper);
-            String note = violated.isEmpty() ? "eligible" : "CONFLICT: " + violated;
+            String note = violated.isEmpty() ? (assignmentService.isEligible(paper, r) ? "eligible" : "not eligible (capacity, count, phase or state)") : "CONFLICT: " + violated;
             System.out.println("  " + r.getAccount().getUserId() + " " + r.getAccount().getName()
                     + " | expertise=" + r.getExpertiseTopics()
                     + " | workload=" + r.currentWorkload() + "/" + r.getMaxWorkload()
@@ -477,12 +523,9 @@ public class ConsoleApp {
             return;
         }
         System.out.println("--- Reviews for " + paperId + " ---");
-        double total = 0;
-        for (Review r : reviews) {
-            System.out.println("  " + r);
-            total += r.getScore();
-        }
-        System.out.printf("  Average score: %.2f (%d review(s))%n", total / reviews.size(), reviews.size());
+        for (Review review : reviews) System.out.println("  " + review);
+        Paper paper = repo.findPaper(paperId);
+        if (paper != null) printReviewSummary(paper);
     }
 
     private void makeDecision(ChairRole chair) {
@@ -493,15 +536,23 @@ public class ConsoleApp {
             System.out.println("Paper not found.");
             return;
         }
-        viewReviewsInline(paperId);
-        String decision = readLine("Accept? (y/n): ").trim();
-        boolean accept = decision.equalsIgnoreCase("y") || decision.equalsIgnoreCase("yes");
-        if (chair.makeDecision(paper, accept, repo)) {
-            System.out.println("Decision recorded: " + paper.getStatus());
-        } else {
-            System.out.println("Decision refused: paper is not UNDER_REVIEW (status: "
-                    + paper.getStatus() + ").");
+        if (!decisionService.isReady(paper)) {
+            System.out.println("Decision refused: required reviews are incomplete or paper is not UNDER_REVIEW.");
+            return;
         }
+        viewReviewsInline(paper.getPaperId());
+        printReviewSummary(paper);
+        boolean accept;
+        while (true) {
+            String decision = readLine("Accept? (y/n): ").trim();
+            if ("y".equalsIgnoreCase(decision) || "yes".equalsIgnoreCase(decision)) { accept = true; break; }
+            if ("n".equalsIgnoreCase(decision) || "no".equalsIgnoreCase(decision)) { accept = false; break; }
+            System.out.println("Please enter y or n.");
+        }
+        String reason = "";
+        if (accept != decisionService.recommendsAccept(paper)) reason = readLine("Override reason: ");
+        if (chair.makeDecision(paper, accept, reason, repo)) System.out.println("Decision recorded: " + paper.getStatus());
+        else System.out.println("Decision refused: required reviews are incomplete or paper is not UNDER_REVIEW.");
     }
 
     private void viewReviewsInline(String paperId) {
@@ -513,6 +564,46 @@ public class ConsoleApp {
         for (Review r : reviews) {
             System.out.println("  " + r);
         }
+    }
+
+    private void printReviewSummary(Paper paper) {
+        int count = decisionService.validReviews(paper).size();
+        System.out.printf("  Average score: %.2f (%d valid review(s))%n", decisionService.average(paper), count);
+        System.out.println("  Significant disagreement: " + (decisionService.hasDisagreement(paper) ? "yes" : "no"));
+        System.out.println("  Recommendation: " + (decisionService.isReady(paper)
+                ? (decisionService.recommendsAccept(paper) ? "ACCEPT" : "REJECT") : "pending required reviews"));
+    }
+
+    private void configureConference(ChairRole chair) {
+        System.out.println(repo.getConfiguration());
+        int count = readInt("Required reviewers per paper (1-2): ", 1, 2);
+        int workload = readInt("Maximum reviewer workload: ", 1, 100);
+        double acceptance;
+        while (true) {
+            try {
+                acceptance = Double.parseDouble(readLine("Acceptance threshold (1-5): ").trim());
+                if (!Double.isNaN(acceptance) && acceptance >= 1 && acceptance <= 5) break;
+            } catch (NumberFormatException e) { /* same prompt on invalid numeric input */ }
+            System.out.println("Please enter a number between 1 and 5.");
+        }
+        int disagreement = readInt("Disagreement threshold (1-4): ", 1, 4);
+        conferenceService.configure(chair, count, workload, acceptance, disagreement);
+        System.out.println("Conference configured.");
+    }
+
+    private void changePhase(ChairRole chair) {
+        System.out.println(repo.getConfiguration());
+        System.out.println("1. Submission   2. Review   3. Decision");
+        int next = readInt("Phase: ", 1, 3);
+        conferenceService.changePhase(chair, ConferencePhase.values()[next - 1]);
+        System.out.println("Conference phase changed: " + repo.getConfiguration().getPhase());
+    }
+
+    private static class TaskCancelled extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+    }
+    private static class EndOfInput extends RuntimeException {
+        private static final long serialVersionUID = 1L;
     }
 }
 
