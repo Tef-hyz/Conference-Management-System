@@ -51,11 +51,6 @@ public class AuthorRole extends ConferenceRole {
                 || (paper.getStatus() != PaperStatus.SUBMITTED && paper.getStatus() != PaperStatus.UNDER_REVIEW)) return false;
         repo.transaction(() -> {
             for (String id : new ArrayList<String>(paper.getAssignedReviewerIds())) {
-                UserAccount user = repo.findUser(id);
-                if (user != null && user.getRole(ReviewerRole.class) != null) {
-                    user.getRole(ReviewerRole.class).removeAssignedPaper(paper.getPaperId());
-                    repo.saveUser(user);
-                }
                 paper.removeAssignedReviewer(id);
             }
             paper.setStatus(PaperStatus.WITHDRAWN);

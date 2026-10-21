@@ -62,10 +62,16 @@ A Chair must supply a reason to override a recommendation.
 
 Only the submitting author (the first author) can withdraw, before Decision and before
 any final decision. Withdrawal hides the paper and its old reviews from Reviewers,
-removes both sides of the assignment, and releases workload. Historical review records
+removes the paper's reviewer IDs, and releases workload. Historical review records
 remain stored for provenance. New conflicts before Decision remove affected assignments;
 old conflicted reviews are excluded from valid completion, averages and author feedback.
 A replacement must review before proceeding. Conflicts are frozen in Decision phase.
+
+Paper stores the sole assignment relationship as reviewer IDs. ReviewerRole stores
+neither Paper entities nor assignment/completion lists: it queries the repository for
+assigned IDs and derives pending workload from Paper assignments and saved Reviews.
+Its repository reference is transient and rebound after loading or rolling back data.
+Older reviewer-side assignment and completion fields are ignored when loading snapshots.
 
 Co-authors must already have Author accounts. Their account affiliations are always
 included in conflict checks even if other affiliations are entered. Reviewer views omit

@@ -56,6 +56,7 @@ public class FileDataStore implements ConferenceRepository {
                 if (role == null || role.getAccount() != u || !types.add(role.getClass()))
                     throw new IOException("Invalid or duplicate account roles");
         }
+        attachReviewers();
         boolean assigned = false, undecided = false;
         for (Map.Entry<String, Paper> entry : store.papers.entrySet()) {
             Paper paper = entry.getValue();
@@ -65,43 +66,34 @@ public class FileDataStore implements ConferenceRepository {
             if (paper.getAssignedReviewerIds().size() > 2) throw new IOException("Paper exceeds two-reviewer limit");
             if (paper.getStatus() == PaperStatus.WITHDRAWN) {
                 for (String id : new ArrayList<String>(paper.getAssignedReviewerIds())) {
-                    UserAccount u = store.users.get(id);
-                    if (u != null && u.getRole(ReviewerRole.class) != null) u.getRole(ReviewerRole.class).removeAssignedPaper(paper.getPaperId());
                     paper.removeAssignedReviewer(id);
                 }
             }
             for (String id : paper.getAssignedReviewerIds()) {
                 UserAccount u = store.users.get(id);
                 if (u == null || u.getRole(ReviewerRole.class) == null) throw new IOException("Unknown reviewer");
-                u.getRole(ReviewerRole.class).addAssignedPaper(paper.getPaperId());
             }
             assigned |= paper.getStatus() == PaperStatus.UNDER_REVIEW;
             undecided |= paper.getStatus() == PaperStatus.SUBMITTED || paper.getStatus() == PaperStatus.UNDER_REVIEW;
-        }
-        for (ReviewerRole reviewer : findAllReviewers()) {
-            for (String id : new ArrayList<String>(reviewer.getAssignedPaperIds())) {
-                Paper paper = store.papers.get(id);
-                if (paper == null || !paper.getAssignedReviewerIds().contains(reviewer.getAccount().getUserId()))
-                    reviewer.removeAssignedPaper(id);
-            }
         }
         Set<String> pairs = new HashSet<String>();
         for (Review review : store.reviews.values()) {
             if (review == null || !store.papers.containsKey(review.getPaperId()) || !store.users.containsKey(review.getReviewerId())
                     || !pairs.add(review.getPaperId() + ":" + review.getReviewerId())) throw new IOException("Invalid or duplicate review");
         }
-        // Derive pending workload from authoritative stored reviews rather than an old cache.
-        // Keep assignment relationships for access, history and valid-review counting.
-        for (ReviewerRole reviewer : findAllReviewers()) {
-            List<String> completed = new ArrayList<String>();
-            for (Review review : findReviewsByReviewer(reviewer.getAccount().getUserId()))
-                completed.add(review.getPaperId());
-            reviewer.restoreCompletedReviews(completed);
-        }
+        // Legacy reviewer-side assignment/completion fields are ignored by deserialization.
+        // Reverse navigation and workload now query Paper and Review without rebuilding caches.
         if (legacy) {
             ConferencePhase phase = assigned ? ConferencePhase.REVIEW : (!undecided && !store.papers.isEmpty() ? ConferencePhase.DECISION : ConferencePhase.SUBMISSION);
             store.configuration = store.configuration.withPhase(phase);
             store.auditEvents.add(new AuditEvent("LEGACY_MIGRATION", "SYSTEM", "-", "Added configuration and audit support; no historical events fabricated."));
+        }
+    }
+
+    private void attachReviewers() {
+        for (UserAccount user : store.users.values()) {
+            ReviewerRole reviewer = user.getRole(ReviewerRole.class);
+            if (reviewer != null) reviewer.attachRepository(this);
         }
     }
 
@@ -145,6 +137,7 @@ public class FileDataStore implements ConferenceRepository {
         } catch (RuntimeException e) {
             transactionDepth = 0;
             store = before;
+            attachReviewers();
             throw e;
         }
     }
@@ -157,7 +150,11 @@ public class FileDataStore implements ConferenceRepository {
         for (UserAccount other : store.users.values())
             if (!other.getUserId().equals(user.getUserId()) && other.getEmail().equalsIgnoreCase(user.getEmail()))
                 throw new IllegalArgumentException("Email is already registered.");
-        transaction(() -> store.users.put(user.getUserId(), user));
+        transaction(() -> {
+            ReviewerRole reviewer = user.getRole(ReviewerRole.class);
+            if (reviewer != null) reviewer.attachRepository(this);
+            store.users.put(user.getUserId(), user);
+        });
     }
     /** Supports existing IDs and case-insensitive email login without changing callers. */
     @Override public synchronized UserAccount findUser(String id) {
